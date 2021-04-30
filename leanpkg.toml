@@ -1,0 +1,8 @@
+[package]
+name = "cryptomorphism"
+version = "0.1"
+lean_version = "leanprover-community/lean:3.28.0"
+path = "src"
+
+[dependencies]
+mathlib = {git = "https://github.com/leanprover-community/mathlib", rev = "64fdfc742fa84cbc2f9f2218872a89383b4f92b1"}
