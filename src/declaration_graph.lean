@@ -148,7 +148,7 @@ do curr_env ← get_env,
    trace (to_string d.to_name),
    print_item_yaml curr_env d
 
--- run_cmd test
+run_cmd test
 -- run_cmd print_content ff ff-- ff tt
 
 #print continuous

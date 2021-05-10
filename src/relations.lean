@@ -109,4 +109,4 @@ def R (n m : ℕ) : Prop :=
 n < m ∨ n > 10
 
 example : is_transitive R :=
-by { test; sorry }
+by { test, sorry }
