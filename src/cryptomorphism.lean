@@ -143,7 +143,8 @@ meta def try_to_prove (e : expr) : tactic bool := retrieve $ do
 
 /-- Tests whether nm1 is a subclass of nm1. Currently the data fields must have the same name for
 this tactic to work. -/
-meta def is_subclass (nm1 nm2 : name) : tactic unit := retrieve $ do
+meta def is_subclass (nm1 nm2 : name) (show_state := ff) : tactic unit :=
+  (if show_state then id else retrieve : tactic unit → tactic unit) $ do
   M ← add_to_context `M (expr.sort $ (level.param `u).succ),
   info1 ← add_fields_to_context nm1 `h1 [M],
   info2 ← add_fields_to_context nm2 `h2 [M],
