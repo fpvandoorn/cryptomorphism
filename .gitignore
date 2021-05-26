@@ -287,5 +287,6 @@ TSWLatexianTemp*
 
 ### LEAN GITIGNORE
 *.olean
-/_target
-/leanpkg.path
+_target
+leanpkg.path
+/lean4/build

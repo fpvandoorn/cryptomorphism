@@ -1,5 +1,5 @@
 [package]
-name = "cryptomorphism"
+name = "cryptomorphism3"
 version = "0.1"
 lean_version = "leanprover-community/lean:3.28.0"
 path = "src"
