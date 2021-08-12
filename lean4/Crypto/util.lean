@@ -150,4 +150,36 @@ def eraseList (ns : NameSet) (nms : List Name) : NameSet :=
 nms.foldl NameSet.erase ns
 
 end NameSet
+
+namespace Meta
+
+instance : Inhabited CasesSubgoal :=
+⟨arbitrary, Name.anonymous⟩
+
+/--
+  Convert the given goal `Ctx |- target` into `Ctx, name : type |- target` and `Ctx |- type`.
+  It assumes `val` has type `type`.
+  Similar to `assert`, but uses a metavariable for `val`. -/
+def assertm (mvarId : MVarId) (name : Name) (type : Expr) : MetaM (FVarId × MVarId × MVarId) :=
+  withMVarContext mvarId do
+    checkNotAssigned mvarId `assert
+    let tag    ← getMVarTag mvarId
+    let target ← getMVarType mvarId
+    let newType := mkForall name BinderInfo.default type target
+    let newMVarFn ← mkFreshExprSyntheticOpaqueMVar newType tag
+    let newMVarB ← mkFreshExprSyntheticOpaqueMVar type tag
+    assignExprMVar mvarId (mkApp newMVarFn newMVarB)
+    let (newFVarId, newMVarId) ← intro1P newMVarFn.mvarId!
+    pure (newFVarId, newMVarId, newMVarB.mvarId!)
+
+/--
+Convert the given goal `Ctx |- target` into `Ctx, name : type |- target`.
+It assumes `val` has type `type` -/
+def asserti (mvarId : MVarId) (name : Name) (type : Expr) (val : Expr) : MetaM (FVarId × MVarId) :=
+do
+let m ← assert mvarId name type val
+intro1P m
+
+end Meta
+
 end Lean
