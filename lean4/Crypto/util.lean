@@ -69,6 +69,14 @@ def updateSuffix (f : String → String) : Name → Name
 | str n s _ => mkStr n (f s)
 | n         => n
 
+def head! : Name → String
+| str anonymous s _ => s
+| str n s _         => head! n
+| num anonymous s _ => toString s
+| num n s _         => head! n
+| anonymous         => panic! "Name.anonymous doesn't have a head"
+
+
 end Name
 
 namespace Expr
