@@ -145,6 +145,10 @@ e.replace $ λ subterm =>
 def ListFvarIds (e : Expr) : NameSet :=
 e.foldAtomic NameSet.empty $ λ e' _ es => if e'.isFVar then es.insert e'.fvarId! else es
 
+/-- Replace occurrences of the free variables `fvars` in `e` with `vs` -/
+def instantiateFVars (e : Expr) (fvars : Array (Expr × Expr)) : Expr :=
+e.replaceFVars (fvars.map (·.fst)) $ fvars.map (·.snd)
+
 end Expr
 
 namespace NameSet

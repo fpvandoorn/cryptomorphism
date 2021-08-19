@@ -4,12 +4,18 @@ open Lean Elab Tactic Meta
 
 /-- `isIn e l` tests whether `e` is definitionally equal to an expression in `l`. -/
 def isIn (e : Expr) (es : Array Expr) : MetaM Bool :=
-es.foldrM (λ e' b => do b || (← isDefEq e e')) false
+es.foldrM (init := false) λ e' b => do b || (← isDefEq e e')
 
-def AddToContext (lctx : LocalContext) (h : Name) (t : Expr) : MetaM (LocalContext × FVarId) := do
-  let nm ← mkFreshFVarId
-  let new_lctx := lctx.addDecl (mkLocalDeclEx 0 nm h t BinderInfo.default)
-  return (new_lctx, nm)
+-- /-- `getDefEq e l` tries to find the first expression `f` in `l` definitionally equal to `e`. -/
+-- def getDefEq (e : Expr) (es : Array Expr) : MetaM Bool :=
+-- es.findM? λ e' => _do if (← isDefEq e e') then _ else
+
+
+
+-- def AddToContext (lctx : LocalContext) (h : Name) (t : Expr) : MetaM (LocalContext × FVarId) := do
+--   let nm ← mkFreshFVarId
+--   let new_lctx := lctx.addDecl (mkLocalDeclEx 0 nm h t BinderInfo.default)
+--   return (new_lctx, nm)
 
 #check getMVarType
 #check assignExprMVar
@@ -27,6 +33,9 @@ structure FieldData where
 (depends : NameSet)
 (isProp : Bool)
 
+structure FieldMapping extends FieldData where
+(tgt : Option Expr)
+
 open Std.Format
 
 instance : ToFormat NameSet :=
@@ -40,6 +49,9 @@ namespace FieldData
 
 def name (fields : FieldData) : Name :=
 fields.decl.userName.head!
+
+def toFieldMapping (fields : FieldData) : FieldMapping :=
+{ toFieldData := fields, tgt := none }
 
 end FieldData
 
@@ -74,17 +86,33 @@ def AddFieldsToContext (mvarId : MVarId) (nm : Name) (us : List Level) (args : A
   let fieldData := ldecls.zipWith5 FieldData.mk fieldExprs types depends axiom_fields
   -- IO.println f!"field data: {← fieldData.mapM ppFieldData}"
   return (mvarId, m2, fieldData)
-#print Array.foldr
+
 -- for testing
 def trivialMapping (lctx : LocalContext) (fields1 fields2 : Array FieldData) :
-  MetaM $ Array Expr × Array Expr := do
+  MetaM $ Array (Expr × Expr) × Array FieldMapping := do
+  let fieldMapping :=
+    fields1.map λ info => FieldMapping.mk info $
+      if info.isProp then none else
+      fields2.findSome! λ info' => if info.name == info'.name then some info'.fvar else none
+  let mapping := fieldMapping.filterMap λ map =>
+    if map.tgt.isSome then some (map.fvar, map.tgt.get!) else none
   let dataFields := fields1.filter λ info => !info.isProp
-  let map1 ← dataFields.map λ info => info.fvar
+  let map1 ← dataFields.map (·.fvar)
   let map2 ← dataFields.map λ info => fields2.findSome! λ info' =>
     if info.name == info'.name then some info'.fvar else none
   -- let map2 := map2.map λ info? => info?.getD arbitrary
   --(info.fvar.fvarId!.updateSuffix λ s => "h2" ++ s) |>.toExpr
-  return (map1, map2)
+  return (mapping, fieldMapping)
+
+def mkFieldMapping (fields1 fields2 : Array FieldData) :
+  MetaM $ Array (Expr × Expr) := do
+  let dataFields := fields1.filter λ info => !info.isProp
+  let map1 ← dataFields.map (·.fvar)
+  let map2 ← dataFields.map λ info => fields2.findSome! λ info' =>
+    if info.name == info'.name then some info'.fvar else none
+  -- let map2 := map2.map λ info? => info?.getD arbitrary
+  --(info.fvar.fvarId!.updateSuffix λ s => "h2" ++ s) |>.toExpr
+  return (map1.zip map2)
 
 -- todo
 def allMappings (fields1 fields2 : Array FieldData) : MetaM $ List $ List (FVarId × Expr) := do
@@ -92,14 +120,22 @@ def allMappings (fields1 fields2 : Array FieldData) : MetaM $ List $ List (FVarI
  let dataFields2 := fields2.filter λ info => !info.isProp
  throwError "todo"
 
-
 /-- Find which axioms in fields1 also occur in fields2 under the renaming `mapping`. -/
-def matchingAxioms (fields1 fields2 : Array FieldData) (map1 map2 : Array Expr) :
+def matchingAxioms (fields1 fields2 : Array FieldData) (mapping : Array (Expr × Expr)) :
   MetaM $ Array FieldData := do
   let propFields := fields1.filter λ info => info.isProp
   let types2 : Array Expr := fields2.filterMap λ info => if info.isProp then info.type else none
-  let same ← propFields.filterM λ info => isIn (info.type.replaceFVars map1 map2) types2
+  let same ← propFields.filterM λ info => isIn (info.type.instantiateFVars mapping) types2
   return same
+
+-- /-- Find which axioms in fields1 also occur in fields2 under the renaming `mapping`. -/
+-- def matchingAxioms2 (fields1 : Array FieldMapping) (fields2 : Array FieldData)
+--   (mapping : Array (Expr × Expr)) :
+--   MetaM $ Array FieldMapping := do
+--   let propFields := fields1.filter λ info => info.isProp
+--   let types2 : Array Expr := fields2.filterMap λ info => if info.isProp then info.type else none
+--   let same ← propFields.mapM λ info => isIn (info.type.instantiateFVars mapping) types2
+--   return same
 
 def mkSimpContext (simpOnly := false) : MetaM Simp.Context := do
   return {
@@ -140,11 +176,12 @@ def isSubclass (mvarId : MVarId) (nm1 nm2 : Name) (show_state := false) :
   let (M, mvarId) ← asserti mvarId `M (mkSort (mkLevelSucc u)) (mkConst `PUnit [mkLevelSucc u])
   let (mvarId, m1, fields1) ← AddFieldsToContext mvarId nm1 [u] #[mkFVar M]
   let (mvarId, m2, fields2) ← AddFieldsToContext mvarId nm2 [u] #[mkFVar M]
+  -- let mapping := fields1.map (·.toFieldMapping)
   withMVarContext mvarId do
-  let (map1, map2) ← trivialMapping (← getLCtx) fields1 fields2
+  let (mapping, fieldMapping) ← trivialMapping (← getLCtx) fields1 fields2
   -- IO.println f!"map 1: {← map1.mapM Meta.ppExpr}"
   -- IO.println f!"map 2: {← map2.mapM Meta.ppExpr}"
-  let matching ← matchingAxioms fields1 fields2 map1 map2
+  let matching ← matchingAxioms fields1 fields2 mapping
   let matchingUniqs := matching.map λ info => info.fvar.fvarId!
   let todo := fields1.filter λ info => info.isProp && !matchingUniqs.contains info.fvar.fvarId!
   if todo.isEmpty then
@@ -153,7 +190,7 @@ def isSubclass (mvarId : MVarId) (nm1 nm2 : Name) (show_state := false) :
     -- trace $ todo.map λ info => info.fvar.local_pp_name,
     -- let cannot_prove ← todo.filterM λ info => bnot <$> try_to_prove (info.type.instantiate_locals mapping),
     let cannotProve ← todo.filterM λ info =>
-      not <$> tryToProve mvarId (info.type.replaceFVars map1 map2)
+      not <$> tryToProve mvarId (info.type.instantiateFVars mapping)
     -- trace $ cannot_prove.map λ info => info.fvar.local_pp_name,
     if cannotProve.isEmpty then
     IO.println s!"{nm1} is a subclass of {nm2}: {nm2} has all the data fields of {nm1}, and all the axioms of {nm1} can be proven from the axioms of {nm2}."
