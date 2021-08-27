@@ -5,17 +5,21 @@ open Lean Elab Tactic Meta
 
 namespace Crypto
 
-/-- `isIn e l` tests whether `e` is definitionally equal to an expression in `l`. -/
-def isIn (e : Expr) (es : Array Expr) : MetaM Bool :=
-es.foldrM (init := false) λ e' b => do b || (← isDefEq e e')
+/-- Return true iff `constName` is the a non-recursive inductive datatype without indices
+  that has only one constructor. If `includeProp` is false, we also check that the datatype is
+  not `Prop` or `Sort*` -/
+def isVeryStructureLike (env : Environment) (constName : Name) (includeProp := true) : Bool :=
+  match env.find? constName with
+  | some d@(ConstantInfo.inductInfo { isRec := false, ctors := [ctor], numIndices := 0, .. }) =>
+    includeProp || d.toConstantVal.type.getForallBody.level!.isASucc
+  | _ => false
 
--- #check getMVarType
--- #check assignExprMVar
--- #check liftMetaMAtMain
--- #check getMainGoal
--- #check withMainContext
--- #check evalGeneralize
--- #check Parser.Tactic.generalize
+/-- Good names for new hypotheses when casing on a variable with name `nm` and type `constName`. -/
+def giveNames (env : Environment) (constName nm : Name) : Array Name :=
+  match getStructureInfo? env constName with
+  | some p => p.fieldNames.map λ s => nm.appendAfter ("_" ++ s.toString)
+  | _ => if constName == `Exists then #[nm.appendAfter "_val", nm.appendAfter "_prop"] else #[]
+
 
 /- the data we record for each field -/
 structure FieldData where
@@ -29,12 +33,15 @@ deriving Inhabited
 /- additionally an expression that gives us the translation to another field -/
 structure FieldMapping extends FieldData where
 (tgt : Option Expr)
+deriving Inhabited
 
 structure Context where
 (target : Array FieldData)
+deriving Inhabited
 
 structure State where
 (mapping : Array FieldMapping)
+deriving Inhabited
 
 open Std.Format
 
@@ -72,14 +79,14 @@ end FieldMapping
 def ppFieldData (x : FieldData) : MetaM Format :=
 do return group (nest 1 (format "⟨"  ++
 format x.name ++ format "," ++ line ++
-format (← ppExpr x.fvar) ++ format "," ++ line ++
-format (← ppExpr x.type) ++ format "," ++ line ++
-format (← x.depends.toList.mapM λ e => ppExpr (mkFVar e)) ++ format "," ++ line ++
+format (← Meta.ppExpr x.fvar) ++ format "," ++ line ++
+format (← Meta.ppExpr x.type) ++ format "," ++ line ++
+format (← x.depends.toList.mapM λ e => Meta.ppExpr (mkFVar e)) ++ format "," ++ line ++
 format x.isProp ++ format "⟩"))
 
 /-- make a field mapping with no connections. -/
 def mkState (fields1 : Array FieldData) : State :=
-{ mapping := fields1.map λ info => { toFieldData := info, tgt := none } }
+{ mapping := fields1.map (·.toFieldMapping) }
 
 namespace State
 
@@ -110,62 +117,99 @@ def missingData (st : State) : Array FieldData :=
 st.mapping.filterMap λ info =>
   if info.tgt.isNone && !info.isProp then some info.toFieldData else none
 
+def traceMapping (st : State) : MetaM (Array Format) :=
+st.mapping.mapM λ info : FieldMapping =>
+  if info.tgt.isSome then Meta.ppExpr info.tgt.get! else return Format.nil
+
+
 end State
 
 namespace Meta
 
-def AddFieldsToContext (mvarId : MVarId) (nm : Name) (us : List Level) (args : Array Expr) :
-  MetaM (MVarId × MVarId × Array FieldData) := do
-  let e ← getEnv
-  let d ← e.find? nm
-  let tt ← isStructureLike e nm
-  let eStr ← mkAppN (mkConst nm us) args
-  let (h, mvarId, m2) ← assertm mvarId `h eStr
-  let l ← cases mvarId h
-  let info := l.get! 0
-  let mvarId := info.mvarId
+def fieldDataofCaseGoals (l : Array CasesSubgoal) : MetaM (MVarId × Array FieldData) := do
+  let casegoal := l.get! 0
+  let mvarId := casegoal.mvarId
   withMVarContext mvarId do
   let lctx ← getLCtx
-  let fieldExprs := info.fields
+  let fieldExprs := casegoal.fields
   let fields := fieldExprs.map Expr.fvarId!
   let ldecls := fields.map λ e => lctx.fvarIdToDecl.find! e
   let axiom_fields ← fieldExprs.mapM isProof
   let types ← fieldExprs.mapM inferType
   let depends := types.map λ tp => tp.ListFvarIds
   let fieldData := ldecls.zipWith5 FieldData.mk fieldExprs types depends axiom_fields
+  return (mvarId, fieldData)
+
+def updateFieldData (l : Array CasesSubgoal) (fields : Array FieldData) :
+  MetaM (Array FieldData) := do
+  let casegoal := l.get! 0
+  let mvarId := casegoal.mvarId
+  let fieldData ← withMVarContext mvarId $ fields.mapM λ info =>
+    match casegoal.subst.find? info.fvar.fvarId! with
+    | (some e) => do
+      let lctx ← getLCtx
+      let id := e.fvarId!
+      let ldecl := lctx.fvarIdToDecl.find! id
+      let t ← inferType e
+      let depends := NameSet.empty -- todo
+      return ⟨ldecl, e, t, depends, info.isProp⟩
+    | none => return info
+  return fieldData
+
+def AddFieldsToContext (mvarId : MVarId) (nm : Name) (us : List Level) (args : Array Expr) :
+  MetaM (MVarId × MVarId × Array FieldData) := do
+  let env ← getEnv
+  let d ← env.find? nm
+  let true ← isStructureLike env nm
+  let eStr ← mkAppN (mkConst nm us) args
+  let (h, mvarId, m2) ← assertm mvarId `h eStr
+  let l ← cases mvarId h
+  let (mvarId, fieldData) ← fieldDataofCaseGoals l
   return (mvarId, m2, fieldData)
 
 /-- map the data fields to data fields of the same name. -/
-def trivialMapping (lctx : LocalContext) (st : State) (ctx : Context) : State :=
+def trivialMapping (st : State) (ctx : Context) : State :=
 st.update $ λ info =>
   if info.isProp then none else
     ctx.target.findSome? λ info' => if info.name == info'.name then some info'.fvar else none
 
 /-- map the data fields to data fields with the same type, if a unique such data field exists. -/
-def uniqueMapping (lctx : LocalContext) (st : State) (ctx : Context) : MetaM State :=
+def uniqueMapping (st : State) (ctx : Context) : MetaM State :=
 st.updateM $ λ info => if info.isProp then return none else do
   let sources ← st.mapping.filterM λ info' => isDefEq info.type info'.type
   let targets ← ctx.target.filterM λ info' => isDefEq info.type info'.type
   return (if sources.size = 1 ∧ targets.size = 1 then some (targets.get! 0).fvar else none)
 
--- todo
-def allMappings (fields1 fields2 : Array FieldData) : MetaM $ List $ List (FVarId × Expr) := do
- let dataFields1 := fields1.filter λ info => !info.isProp
- let dataFields2 := fields2.filter λ info => !info.isProp
- throwError "todo"
+set_option pp.all true
+partial def caseOnStructures (mvarId : MVarId) (st : Array FieldData) (ctx : Context)
+  (includeProp := true) :
+  MetaM (MVarId × Array FieldData) := do
+  let env ← getEnv
+  let info? := st.find? λ info =>
+    info.type.getAppFn.constName?.any (isVeryStructureLike env · includeProp)
+  match info? with
+  | some info => do
+    let rest := st.filter λ info' => info'.fvar.fvarId! != info.fvar.fvarId!
+    let str := info.type.getAppFn.constName!
+    -- todo: there seems to be a bug with the given names when transitively extending structures. Do we need to skip fields?
+    -- IO.println (giveNames env str info.name)
+    let l ← cases mvarId info.fvar.fvarId! #[⟨false, (giveNames env str info.name).toList⟩]
+    let (mvarId, fieldData) ← fieldDataofCaseGoals l
+    let rest ← updateFieldData l rest
+    caseOnStructures mvarId (rest ++ fieldData) ctx includeProp
+  | none =>
+    return (mvarId, st)
 
-/-- Find which axioms in fields1 also occur in fields2 under the renaming `mapping`. -/
+
+/-- Find which axioms of the first structure that occur in the second structure. -/
 def matchingAxioms (st : State) (ctx : Context) : MetaM State := do
-  -- let propFields := fields1.filter λ info => info.isProp
-  let types2 : Array Expr := ctx.target.filterMap λ info => if info.isProp then info.type else none
-  let fieldMapping ←
-    st.mapping.mapM λ info => info.updateM $ do {
-      -- types2.findM? λ e' => do b || (← isDefEq e e')
-
---todo:
-      if (← isIn (info.type.instantiateFVars st.getDataMapping) types2) then
-        return (some arbitrary) else return none }
-  return { mapping := fieldMapping }
+  let targetTypes : Array (Expr × Expr) := ctx.target.filterMap λ info =>
+    if info.isProp then (info.fvar, info.type) else none
+  st.updateM λ info => do
+    let e := info.type.instantiateFVars st.getDataMapping
+    match (← targetTypes.findM? λ (e', t) => isDefEq e t) with
+    | some (e, t) => return (some e)
+    | none => return none
 
 /-- some copy-pasted simp code -/
 def getPropHyps : MetaM (Array FVarId) := do
@@ -204,7 +248,7 @@ let newgoal ← simpTarget mvarId (← mkSimpContext false)
 -- | some x => IO.println "failure!"
 -- | none => IO.println "success!"
 
-/-- Tries to prove `e` in the local context, returns tt if successful. -/
+/-- Tries to prove `e` in the local context, returns the proof if successful. -/
 def tryToProve (mvarId : MVarId) (tac : MVarId → MetaM Unit) (e : Expr) : MetaM (Option Expr) :=
 withoutModifyingState do
   let (fvar, mvarId, m2) ← assertm mvarId `h e
@@ -219,26 +263,32 @@ withoutModifyingState do
 
 /-- Tests whether nm1 is a subclass of nm1. Currently the data fields must have the same Name for
 this tactic to work. -/
-def isSubclass (mvarId : MVarId) (nm1 nm2 : Name) (show_state := false) (trace := true) :
+def isSubclass (mvarId : MVarId) (nm1 nm2 : Name) (trace := false) :
   MetaM (MVarId × MVarId × MVarId × State) := do
   let u := mkLevelParam `u
   let (M, mvarId) ← asserti mvarId `M (mkSort (mkLevelSucc u)) (mkConst `PUnit [mkLevelSucc u])
-  let (mvarId, m1, fields1) ← AddFieldsToContext mvarId nm1 [u] #[mkFVar M]
   let (mvarId, m2, fields2) ← AddFieldsToContext mvarId nm2 [u] #[mkFVar M]
-  -- let mapping := fields1.map (·.toFieldMapping)
-  withMVarContext mvarId do
-  let st := mkState fields1
+  let (mvarId, fields2) ← caseOnStructures mvarId fields2 ⟨#[]⟩ false
   let ctx : Context := ⟨fields2⟩
-  let st ← uniqueMapping (← getLCtx) st ctx
-  let st ← trivialMapping (← getLCtx) st ctx
+  if trace then IO.println s!"cases on fields class 2: {← ctx.target.map (·.name)}"
+  let (mvarId, m1, fields1) ← AddFieldsToContext mvarId nm1 [u] #[mkFVar M]
+  let (mvarId, fields1) ← caseOnStructures mvarId fields1 ctx
+  let st := mkState fields1
+  withMVarContext mvarId do
+  let st ← uniqueMapping st ctx
+  let st := trivialMapping st ctx
+  if trace then IO.println s!"map of data: {← st.traceMapping}"
+  let (mvarId, fields2) ← caseOnStructures mvarId fields2 ⟨#[]⟩ -- is this dangerous?
+  let ctx : Context := ⟨fields2⟩
+  withMVarContext mvarId do
+  let ctx : Context := ⟨fields2⟩
   let st ← matchingAxioms st ctx
-  let st ← st.updateM λ info =>
+  let st ← st.updateM λ info => if !info.isProp then return none else
     tryToProve mvarId currentAutomation (info.type.instantiateFVars st.getDataMapping)
-  if st.done then
-    IO.println s!"{nm1} is a subclass of {nm2}"
-  else
-    IO.println s!"Cannot construct the following fields of {nm1} from {nm2}:
-    {← st.missing.mapM λ info : FieldData => ppExpr info.fvar}."
+  if st.done then IO.println s!"{nm1} is a subclass of {nm2}"
+  else IO.println s!"Cannot construct the following fields of {nm1} from {nm2}:
+  {st.missing.map (·.name)}."
+  if trace then IO.println s!"map: {← st.traceMapping}"
   return (mvarId, m1, m2, st)
 
 end Meta
@@ -250,9 +300,9 @@ syntax (name := guardHyp) "guardHyp " (" : " term)? : tactic
     return ()
   | _ => throwUnsupportedSyntax
 
-def isSubclassTac (nm1 nm2 : Name) : TacticM Unit := withMainContext do
+def isSubclassTac (nm1 nm2 : Name) (trace := false) : TacticM Unit := withMainContext do
 let mvarId ← getMainGoal
-let (mvarId, m1, m2, result) ← Meta.isSubclass mvarId nm1 nm2
+let (mvarId, m1, m2, result) ← Meta.isSubclass mvarId nm1 nm2 trace
 let l ← getUnsolvedGoals
 setGoals (mvarId::m1::m2::l)
 
@@ -264,93 +314,120 @@ syntax (name := isSubclassE) "isSubclass! " ident ident : tactic
   | _ => throwUnsupportedSyntax
 @[tactic «isSubclassE»] def evalIsSubclassE : Tactic := fun stx =>
   match stx with
-  | `(tactic| isSubclass! $nm1 $nm2) => isSubclassTac nm1.getId nm2.getId
+  | `(tactic| isSubclass! $nm1 $nm2) => isSubclassTac nm1.getId nm2.getId true
   | _ => throwUnsupportedSyntax
 
 
 end Crypto
+open Crypto
 
 /-!
-We define some notions of commutative monoids,
-* the first is right-unital
-* the second is right-unital, and then has a superfluous axiom `1 * 1 = 1`
-* the third is both left-unital and right-unital.
-* the fourth is with a implicit unit
-* the fifth is denoted additively
+## Demo and tests
+
+We define some notions of commutative Monoids,
+(1) right-unital
+(2) right-unital, and then has a superfluous axiom `1 * 1 = 1`
+(3) both left-unital and right-unital.
+(4) denoted additively
+(5) with a unit given by an existential quantifier (`∃ one, ...`)
+(6) by extending a `Monoid` structure.
 -/
 
-class comm_monoid1 (M : Type _) :=
-(mul : M → M → M)
-(mul_assoc : ∀ x y z, mul (mul x y) z = mul x (mul y z))
-(mul_comm : ∀ x y, mul x y = mul y x)
+class CommMonoid1 (M : Type _) extends Mul M :=
+(mul_assoc : ∀ x y z : M, (x * y) * z = x * (y * z))
+(mul_comm : ∀ x y : M, x * y = y * x)
 (one : M)
-(mul_one : ∀ x, mul x one = x)
+(mul_one : ∀ x, x * one = x)
 
-class comm_monoid2 (M : Type _) :=
+class CommMonoid2 (M : Type _) extends Mul M :=
 (one : M)
-(mul : M → M → M)
-(mul_one : ∀ x, mul x one = x)
-(one_mul_one : mul one one = one)
-(mul_assoc : ∀ x y z, mul (mul x y) z = mul x (mul y z))
-(mul_comm : ∀ x y, mul x y = mul y x)
+(mul_one : ∀ x, x * one = x)
+(one_mul_one : one * one = one)
+(mul_assoc : ∀ x y z : M, (x * y) * z = x * (y * z))
+(mul_comm : ∀ x y : M, x * y = y * x)
 
-class comm_monoid3 (M : Type _) :=
+class CommMonoid3 (M : Type _) extends Mul M :=
 (one : M)
-(mul : M → M → M)
-(mul_one : ∀ x, mul x one = x)
+(mul_one : ∀ x, x * one = x)
 (one_mul : ∀ x, mul one x = x)
-(mul_assoc : ∀ x y z, mul (mul x y) z = mul x (mul y z))
-(mul_comm : ∀ x y, mul x y = mul y x)
+(mul_assoc : ∀ x y z : M, (x * y) * z = x * (y * z))
+(mul_comm : ∀ x y : M, x * y = y * x)
 
-class comm_monoid4 (M : Type _) :=
-(mul : M → M → M)
-(mul_assoc : ∀ x y z, mul (mul x y) z = mul x (mul y z))
-(mul_comm : ∀ x y, mul x y = mul y x)
-(exists_one : ∃ one, ∀ x, mul x one = x)
-
-class comm_monoid5 (M : Type _) :=
-(add : M → M → M)
-(add_assoc : ∀ x y z, add (add x y) z = add x (add y z))
-(add_comm : ∀ x y, add x y = add y x)
+class CommMonoid4 (M : Type _) extends Add M :=
+(add_assoc : ∀ x y z : M, (x + y) + z = x + (y + z))
+(add_comm : ∀ x y : M, x + y = y + x)
 (zero : M)
-(add_zero : ∀ x, add x zero = x)
+(add_zero : ∀ x : M, x + zero = x)
 
-example : Unit := by
-  isSubclass comm_monoid1 comm_monoid2 -- subclass
-  isSubclass comm_monoid2 comm_monoid1 -- subclass
-  isSubclass comm_monoid1 comm_monoid3 -- subclass
-  isSubclass comm_monoid3 comm_monoid1 -- missing: one_mul
-  isSubclass comm_monoid1 comm_monoid5 -- subclass
-  isSubclass comm_monoid5 comm_monoid1 -- subclass
-  isSubclass comm_monoid4 comm_monoid1 -- missing: exists_one
-  isSubclass comm_monoid1 comm_monoid4 -- missing: one, mul_one
-  exact ()
+class CommMonoid5 (M : Type _) extends Mul M :=
+(mul_axioms : (∀ x y z : M, (x * y) * z = x * (y * z)) ∧ (∀ x y : M, x * y = y * x))
+(exists_one : ∃ one : M, ∀ x, x * one = x)
 
-/-! As a sanity check: we cannot prove commutativity on an arbitrary monoid. -/
-
-class my_monoid (M : Type _) :=
-(mul : M → M → M)
-(mul_assoc : ∀ x y z, mul (mul x y) z = mul x (mul y z))
+class Monoid (M : Type _) extends Mul M :=
 (one : M)
-(mul_one : ∀ x, mul x one = x)
+(mul_assoc : ∀ x y z : M, (x * y) * z = x * (y * z))
+(mul_one : ∀ x, x * one = x)
 
-example : Unit := by
-  isSubclass my_monoid comm_monoid1 -- subclass
-  isSubclass comm_monoid1 my_monoid -- missing (as expected): mul_comm
-  exact ()
+class CommMonoid6 (M : Type _) extends Monoid M :=
+(mul_comm : ∀ x y : M, x * y = y * x)
+
+example : True := by
+  isSubclass CommMonoid1 CommMonoid2 -- subclass
+  isSubclass CommMonoid2 CommMonoid1 -- subclass
+  isSubclass CommMonoid1 CommMonoid3 -- subclass
+  isSubclass CommMonoid3 CommMonoid1 -- missing: one_mul [need better automation]
+  isSubclass CommMonoid1 CommMonoid4 -- subclass
+  isSubclass CommMonoid4 CommMonoid1 -- subclass
+  isSubclass CommMonoid5 CommMonoid1 -- subclass
+  isSubclass CommMonoid1 CommMonoid5 -- missing: one, mul_one [need support for existentials]
+  isSubclass CommMonoid6 CommMonoid1 -- subclass
+  isSubclass CommMonoid1 CommMonoid6 -- subclass
+  trivial
+
+/-! As a sanity check: we cannot prove commutativity on an arbitrary Monoid. -/
+
+class MyMonoid (M : Type _) extends Mul M :=
+(mul_assoc : ∀ x y z : M, (x * y) * z = x * (y * z))
+(one : M)
+(mul_one : ∀ x, x * one = x)
+
+example : True := by
+  isSubclass MyMonoid CommMonoid1 -- subclass
+  isSubclass CommMonoid1 MyMonoid -- missing (expected): mul_comm
+  trivial
 
 /-! If two data fields have the same type, we try to get the one with the same name.
 In the future we could look at which choice will make more axioms overlap. -/
 
-class my_almost_ring (M : Type _) :=
+class MyAlmostRing (M : Type _) extends Mul M :=
 (add : M → M → M)
-(mul : M → M → M)
-(mul_assoc : ∀ x y z, mul (mul x y) z = mul x (mul y z))
-(mul_comm : ∀ x y, mul x y = mul y x)
+(mul_assoc : ∀ x y z : M, (x * y) * z = x * (y * z))
+(mul_comm : ∀ x y : M, x * y = y * x)
 (one : M)
-(mul_one : ∀ x, mul x one = x)
+(mul_one : ∀ x, x * one = x)
 
-example : Unit := by
-  isSubclass comm_monoid1 my_almost_ring -- subclass
-  isSubclass my_almost_ring comm_monoid1 -- missing (as expected): add
-  exact ()
+example : True := by
+  isSubclass CommMonoid1 MyAlmostRing -- subclass
+  isSubclass MyAlmostRing CommMonoid1 -- missing (expected): add
+  trivial
+
+  /-! Test which "fields" are missing when inside nested structures. -/
+
+class CommMonoidBundled1 (M : Type _) extends Mul M :=
+(mul_assoc : ∀ x y z : M, (x * y) * z = x * (y * z))
+(mul_comm : ∀ x y : M, x * y = y * x)
+(one_axioms : ∃ one : M, (∀ x, x * one = x) ∧ (∀ x, x * x = one))
+
+class CommMonoidBundled2 (M : Type _) :=
+(data : (M → M → M) × M)
+(mul_assoc : ∀ x y z, data.1 (data.1 x y) z = data.1 x (data.1 y z))
+(mul_comm : ∀ x y, data.1 x y = data.1 y x)
+(one_axioms : ∀ x, data.1 x data.2 = x)
+
+
+example : True := by
+  isSubclass CommMonoidBundled1 CommMonoid1 -- missing (expected): one_axioms_prop_right
+  isSubclass CommMonoid1 CommMonoidBundled1 -- missing: one, one_mul [need support for existentials]
+  isSubclass CommMonoidBundled2 CommMonoid1 -- subclass
+  isSubclass CommMonoid1 CommMonoidBundled2 -- subclass
+  trivial

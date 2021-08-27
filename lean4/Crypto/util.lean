@@ -79,6 +79,17 @@ def head! : Name → String
 
 end Name
 
+namespace Level
+
+/-- Is a level equal to a succ, when all (meta)variables are instantiated with 0? -/
+def isASucc : Level → Bool
+| succ _ _   => true
+| max u v _  => isASucc u || isASucc v
+| imax u v _ => isASucc v
+| _          => false
+
+end Level
+
 namespace Expr
 
 /-- Warning: very slow performance! -/
@@ -148,6 +159,10 @@ e.foldAtomic NameSet.empty $ λ e' _ es => if e'.isFVar then es.insert e'.fvarId
 /-- Replace occurrences of the free variables `fvars` in `e` with `vs` -/
 def instantiateFVars (e : Expr) (fvars : Array (Expr × Expr)) : Expr :=
 e.replaceFVars (fvars.map (·.fst)) $ fvars.map (·.snd)
+
+def level! : Expr → Level
+| sort u _ => u
+| _        => arbitrary
 
 end Expr
 
