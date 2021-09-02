@@ -285,9 +285,6 @@ def isSubclass (mvarId : MVarId) (nm1 nm2 : Name) (trace := false) :
   let st ← matchingAxioms st ctx
   let st ← st.updateM λ info => if !info.isProp then return none else
     tryToProve mvarId currentAutomation (info.type.instantiateFVars st.getDataMapping)
-  if st.done then IO.println s!"{nm1} is a subclass of {nm2}"
-  else IO.println s!"Cannot construct the following fields of {nm1} from {nm2}:
-  {st.missing.map (·.name)}."
   if trace then IO.println s!"map: {← st.traceMapping}"
   return (mvarId, m1, m2, st)
 
@@ -302,9 +299,26 @@ syntax (name := guardHyp) "guardHyp " (" : " term)? : tactic
 
 def isSubclassTac (nm1 nm2 : Name) (trace := false) : TacticM Unit := withMainContext do
 let mvarId ← getMainGoal
-let (mvarId, m1, m2, result) ← Meta.isSubclass mvarId nm1 nm2 trace
+let (mvarId, m1, m2, st) ← Meta.isSubclass mvarId nm1 nm2 trace
+if st.done then IO.println s!"{nm1} is a subclass of {nm2}"
+else IO.println s!"Cannot construct the following fields of {nm1} from {nm2}:
+{st.missing.map (·.name)}."
 let l ← getUnsolvedGoals
 setGoals (mvarId::m1::m2::l)
+
+def cryptomorphicTac (nm1 nm2 : Name) (trace := false) : TacticM Unit := withMainContext do
+let mvarId ← getMainGoal
+let (mvarId, m1, m2, st1) ← Meta.isSubclass mvarId nm1 nm2 trace
+let (mvarId, m3, m4, st2) ← Meta.isSubclass mvarId nm2 nm1 trace
+if st1.done && st2.done then IO.println s!"{nm1} and {nm2} are cryptomorphic"
+else do
+  IO.println s!"Cannot prove that {nm1} and {nm2} are cryptomorphic"
+  if !st1.done then
+    IO.println s!"{nm2} → {nm1}: cannot construct {st1.missing.map (·.name)}"
+  if !st2.done then
+    IO.println s!"{nm1} → {nm2}: Cannot construct {st2.missing.map (·.name)}"
+let l ← getUnsolvedGoals
+setGoals (mvarId::m1::m2::m3::m4::l)
 
 syntax (name := isSubclass) "isSubclass " ident ident : tactic
 syntax (name := isSubclassE) "isSubclass! " ident ident : tactic
@@ -317,6 +331,12 @@ syntax (name := isSubclassE) "isSubclass! " ident ident : tactic
   | `(tactic| isSubclass! $nm1 $nm2) => isSubclassTac nm1.getId nm2.getId true
   | _ => throwUnsupportedSyntax
 
+
+syntax (name := cryptomorphic) "cryptomorphic " ident ident : tactic
+@[tactic «cryptomorphic»] def evalCryptomorphic : Tactic := fun stx =>
+  match stx with
+  | `(tactic| cryptomorphic $nm1 $nm2) => withoutModifyingState $ cryptomorphicTac nm1.getId nm2.getId
+  | _ => throwUnsupportedSyntax
 
 end Crypto
 open Crypto
@@ -333,55 +353,63 @@ We define some notions of commutative Monoids,
 (6) by extending a `Monoid` structure.
 -/
 
-class CommMonoid1 (M : Type _) extends Mul M :=
+class Zero (α : Type u) where
+  zero : α
+
+instance [Zero α] : OfNat α (nat_lit 0) where
+  ofNat := Zero.zero
+
+class One (α : Type u) where
+  one : α
+
+instance [One α] : OfNat α (nat_lit 1) where
+  ofNat := One.one
+
+class CommMonoid1 (M : Type _) extends Mul M, One M :=
 (mul_assoc : ∀ x y z : M, (x * y) * z = x * (y * z))
 (mul_comm : ∀ x y : M, x * y = y * x)
-(one : M)
-(mul_one : ∀ x, x * one = x)
+(mul_one : ∀ x : M, x * 1 = x)
 
-class CommMonoid2 (M : Type _) extends Mul M :=
-(one : M)
-(mul_one : ∀ x, x * one = x)
-(one_mul_one : one * one = one)
+class CommMonoid2 (M : Type _) extends Mul M, One M :=
+(mul_one : ∀ x : M, x * 1 = x)
+(one_mul_one : 1 * 1 = 1)
 (mul_assoc : ∀ x y z : M, (x * y) * z = x * (y * z))
 (mul_comm : ∀ x y : M, x * y = y * x)
 
-class CommMonoid3 (M : Type _) extends Mul M :=
-(one : M)
-(mul_one : ∀ x, x * one = x)
-(one_mul : ∀ x, mul one x = x)
+class CommMonoid3 (M : Type _) extends Mul M, One M :=
+(one_mul : ∀ x : M, 1 * x = x)
 (mul_assoc : ∀ x y z : M, (x * y) * z = x * (y * z))
 (mul_comm : ∀ x y : M, x * y = y * x)
 
-class CommMonoid4 (M : Type _) extends Add M :=
+class CommMonoid4 (M : Type _) extends Add M, Zero M :=
 (add_assoc : ∀ x y z : M, (x + y) + z = x + (y + z))
 (add_comm : ∀ x y : M, x + y = y + x)
-(zero : M)
-(add_zero : ∀ x : M, x + zero = x)
+(add_zero : ∀ x : M, x + 0 = x)
 
 class CommMonoid5 (M : Type _) extends Mul M :=
 (mul_axioms : (∀ x y z : M, (x * y) * z = x * (y * z)) ∧ (∀ x y : M, x * y = y * x))
-(exists_one : ∃ one : M, ∀ x, x * one = x)
+(exists_one : ∃ one : M, ∀ x : M, x * one = x)
 
-class Monoid (M : Type _) extends Mul M :=
-(one : M)
+class Monoid (M : Type _) extends Mul M, One M :=
 (mul_assoc : ∀ x y z : M, (x * y) * z = x * (y * z))
-(mul_one : ∀ x, x * one = x)
+(mul_one : ∀ x : M, x * 1 = x)
 
 class CommMonoid6 (M : Type _) extends Monoid M :=
 (mul_comm : ∀ x y : M, x * y = y * x)
 
+open CommMonoid1
+
+-- example (M : Type _) [CommMonoid1 M] (x : M) : 1 * x = 1 := by
+--   simp [mul_comm]
+
+
+
 example : True := by
-  isSubclass CommMonoid1 CommMonoid2 -- subclass
-  isSubclass CommMonoid2 CommMonoid1 -- subclass
-  isSubclass CommMonoid1 CommMonoid3 -- subclass
-  isSubclass CommMonoid3 CommMonoid1 -- missing: one_mul [need better automation]
-  isSubclass CommMonoid1 CommMonoid4 -- subclass
-  isSubclass CommMonoid4 CommMonoid1 -- subclass
-  isSubclass CommMonoid5 CommMonoid1 -- subclass
-  isSubclass CommMonoid1 CommMonoid5 -- missing: one, mul_one [need support for existentials]
-  isSubclass CommMonoid6 CommMonoid1 -- subclass
-  isSubclass CommMonoid1 CommMonoid6 -- subclass
+  cryptomorphic CommMonoid1 CommMonoid2 -- yes
+  cryptomorphic CommMonoid1 CommMonoid3 -- mul_one, one_mul [need better automation]
+  cryptomorphic CommMonoid1 CommMonoid4 -- yes
+  cryptomorphic CommMonoid1 CommMonoid5 -- one, mul_one [need support for existentials]
+  cryptomorphic CommMonoid1 CommMonoid6 -- yes
   trivial
 
 /-! As a sanity check: we cannot prove commutativity on an arbitrary Monoid. -/
@@ -389,45 +417,44 @@ example : True := by
 class MyMonoid (M : Type _) extends Mul M :=
 (mul_assoc : ∀ x y z : M, (x * y) * z = x * (y * z))
 (one : M)
-(mul_one : ∀ x, x * one = x)
+(mul_one : ∀ x : M, x * one = x)
 
 example : True := by
-  isSubclass MyMonoid CommMonoid1 -- subclass
-  isSubclass CommMonoid1 MyMonoid -- missing (expected): mul_comm
+  cryptomorphic MyMonoid CommMonoid1 -- missing (expected): mul_comm
   trivial
 
-/-! If two data fields have the same type, we try to get the one with the same name.
-In the future we could look at which choice will make more axioms overlap. -/
+/-!
+If two data fields have the same type, we try to get the one with the same name.
+In the future we could look at which choice will make more axioms overlap.
+-/
 
 class MyAlmostRing (M : Type _) extends Mul M :=
 (add : M → M → M)
 (mul_assoc : ∀ x y z : M, (x * y) * z = x * (y * z))
 (mul_comm : ∀ x y : M, x * y = y * x)
 (one : M)
-(mul_one : ∀ x, x * one = x)
+(mul_one : ∀ x : M, x * one = x)
 
 example : True := by
-  isSubclass CommMonoid1 MyAlmostRing -- subclass
-  isSubclass MyAlmostRing CommMonoid1 -- missing (expected): add
+  cryptomorphic CommMonoid1 MyAlmostRing -- missing (expected): add
   trivial
 
-  /-! Test which "fields" are missing when inside nested structures. -/
+/-! Test which "fields" are missing when inside nested structures. -/
 
 class CommMonoidBundled1 (M : Type _) extends Mul M :=
 (mul_assoc : ∀ x y z : M, (x * y) * z = x * (y * z))
 (mul_comm : ∀ x y : M, x * y = y * x)
-(one_axioms : ∃ one : M, (∀ x, x * one = x) ∧ (∀ x, x * x = one))
+(one_axioms : ∃ one : M, (∀ x : M, x * one = x) ∧ (∀ x : M, x * x = one))
 
 class CommMonoidBundled2 (M : Type _) :=
 (data : (M → M → M) × M)
-(mul_assoc : ∀ x y z, data.1 (data.1 x y) z = data.1 x (data.1 y z))
-(mul_comm : ∀ x y, data.1 x y = data.1 y x)
-(one_axioms : ∀ x, data.1 x data.2 = x)
+(mul_assoc : ∀ x y z : M, data.1 (data.1 x y) z = data.1 x (data.1 y z))
+(mul_comm : ∀ x y : M, data.1 x y = data.1 y x)
+(mul_one : ∀ x : M, data.1 x data.2 = x)
 
 
 example : True := by
-  isSubclass CommMonoidBundled1 CommMonoid1 -- missing (expected): one_axioms_prop_right
-  isSubclass CommMonoid1 CommMonoidBundled1 -- missing: one, one_mul [need support for existentials]
-  isSubclass CommMonoidBundled2 CommMonoid1 -- subclass
-  isSubclass CommMonoid1 CommMonoidBundled2 -- subclass
+  cryptomorphic CommMonoidBundled1 CommMonoid1 -- missing (expected): one_axioms_prop_right
+  -- missing: one, one_mul [need support for existentials]
+  cryptomorphic CommMonoidBundled2 CommMonoid1 -- yesss
   trivial
