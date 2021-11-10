@@ -81,7 +81,7 @@ do return group (nest 1 (format "⟨"  ++
 format x.name ++ format "," ++ line ++
 format (← Meta.ppExpr x.fvar) ++ format "," ++ line ++
 format (← Meta.ppExpr x.type) ++ format "," ++ line ++
-format (← x.depends.toList.mapM λ e => Meta.ppExpr (mkFVar e)) ++ format "," ++ line ++
+format (← x.depends.toList.mapM λ e => Meta.ppExpr (mkFVar ⟨e⟩)) ++ format "," ++ line ++
 format x.isProp ++ format "⟩"))
 
 /-- make a field mapping with no connections. -/

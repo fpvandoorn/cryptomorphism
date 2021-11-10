@@ -154,7 +154,7 @@ e.replace $ λ subterm =>
 
 /-- Returns the pretty Names of all local constants in an expression. -/
 def ListFvarIds (e : Expr) : NameSet :=
-e.foldAtomic NameSet.empty $ λ e' _ es => if e'.isFVar then es.insert e'.fvarId! else es
+e.foldAtomic NameSet.empty $ λ e' _ es => if e'.isFVar then es.insert e'.fvarId!.name else es
 
 /-- Replace occurrences of the free variables `fvars` in `e` with `vs` -/
 def instantiateFVars (e : Expr) (fvars : Array (Expr × Expr)) : Expr :=
